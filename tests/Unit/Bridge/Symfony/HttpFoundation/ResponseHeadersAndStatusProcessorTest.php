@@ -58,4 +58,29 @@ final class ResponseHeadersAndStatusProcessorTest extends TestCase
         }
         $this->responseProcessor->process($symfonyResponse, $swooleResponse);
     }
+
+    public function testItDoesNotForwardTransportFramingAndHopByHopHeaders(): void
+    {
+        $symfonyResponse = new HttpFoundationResponse(
+            'success',
+            200,
+            [
+                'Content-Type' => 'application/json',
+                'Content-Length' => '7',
+                'Transfer-Encoding' => 'chunked',
+                'Connection' => 'keep-alive',
+            ]
+        );
+
+        $swooleResponse = $this->swooleResponse->reveal();
+        $this->swooleResponse->status(200)->shouldBeCalled();
+
+        $this->swooleResponse->header('Content-Length', Argument::any())->shouldNotBeCalled();
+        $this->swooleResponse->header('Transfer-Encoding', Argument::any())->shouldNotBeCalled();
+        $this->swooleResponse->header('Connection', Argument::any())->shouldNotBeCalled();
+
+        $this->swooleResponse->header('Content-Type', 'application/json')->shouldBeCalled();
+
+        $this->responseProcessor->process($symfonyResponse, $swooleResponse);
+    }
 }
