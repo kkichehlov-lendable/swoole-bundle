@@ -31,6 +31,7 @@ final class StatefulServicesPass implements CompilerPassInterface
 {
     private const array IGNORED_SERVICES = [
         BlockingContainer::class => true,
+        'swoole_bundle.error_handler.symfony_error_handler' => true,
     ];
 
     private const array MANDATORY_SERVICES_TO_PROXIFY = [
@@ -48,7 +49,6 @@ final class StatefulServicesPass implements CompilerPassInterface
         'router.default',
         'request_stack',
         'slugger',
-        'swoole_bundle.error_handler.symfony_error_handler',
     ];
 
     private const array SERVICE_RESETTING_PRIORITIES = [
