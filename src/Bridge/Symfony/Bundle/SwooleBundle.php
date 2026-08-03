@@ -6,9 +6,12 @@ namespace SwooleBundle\SwooleBundle\Bridge\Symfony\Bundle;
 
 use Assert\Assertion;
 use RuntimeException;
+use SwooleBundle\SwooleBundle\Bridge\CommonSwoole\SystemSwooleFactory;
 use SwooleBundle\SwooleBundle\Bridge\Symfony\Bundle\DependencyInjection\CompilerPass\{BlackfireMonitoringPass,
+    CacheWarmupFixerPass,
     ExceptionHandlerPass,
     FinalizeDefinitionsAfterRemovalPass,
+    HealthCheckPass,
     MessengerTransportFactoryPass,
     RouterOptimizerPass,
     SessionHandlerStorageConfiguratorPass,
@@ -16,6 +19,7 @@ use SwooleBundle\SwooleBundle\Bridge\Symfony\Bundle\DependencyInjection\Compiler
     StreamedResponseListenerPass,
     SwooleTableStorageConfiguratorPass};
 use SwooleBundle\SwooleBundle\Bridge\Symfony\Bundle\DependencyInjection\ContainerConstants;
+use SwooleBundle\SwooleBundle\Bridge\Symfony\ErrorHandler\ContextualErrorHandler;
 use Symfony\Component\DependencyInjection\Compiler\PassConfig;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
 use Symfony\Component\ErrorHandler\ErrorHandler;
@@ -31,10 +35,12 @@ final class SwooleBundle extends Bundle
         $container->addCompilerPass(new MessengerTransportFactoryPass());
         $container->addCompilerPass(new ExceptionHandlerPass());
         $container->addCompilerPass(new RouterOptimizerPass());
+        $container->addCompilerPass(new HealthCheckPass());
         $container->addCompilerPass(new StatefulServicesPass(), PassConfig::TYPE_BEFORE_REMOVING, -10000);
         $container->addCompilerPass(new FinalizeDefinitionsAfterRemovalPass(), PassConfig::TYPE_AFTER_REMOVING, -10000);
         $container->addCompilerPass(new SwooleTableStorageConfiguratorPass());
         $container->addCompilerPass(new SessionHandlerStorageConfiguratorPass());
+        $container->addCompilerPass(new CacheWarmupFixerPass());
     }
 
     /**
@@ -61,14 +67,14 @@ final class SwooleBundle extends Bundle
             return;
         }
 
+        // from now on, error/exception handler overrides are isolated per coroutine
+        ContextualErrorHandler::register(SystemSwooleFactory::newFactoryInstance()->newInstance());
+
         /** @var ErrorHandler $handler */
         $handler = $this->container->get('swoole_bundle.error_handler.symfony_error_handler');
-        $debug = $this->container->getParameter('kernel.debug');
 
-        if ($debug) {
-            // override the default error handler registered earlier by Symfony to not get an exception
-            set_exception_handler([$handler, 'handleException']);
-        }
+        // override the default error handler registered earlier by Symfony to not get an exception
+        set_exception_handler([$handler, 'handleException']);
 
         $handler = ErrorHandler::register($handler, true);
         $configurator = $this->container->get('debug.error_handler_configurator');

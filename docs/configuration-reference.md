@@ -47,10 +47,12 @@ swoole:
     # enables hot module reload using inotify
     hmr:
       enabled: auto
-    # hmr enabled can be one of: off, (default) auto, inotify, external
+    # hmr enabled can be one of: off, (default) auto, inotify, stat, external
     #   - off: turn off feature
-    #   - auto: use inotify if installed in the system
+    #   - auto: use inotify if installed in the system, otherwise stat (polling); debug only
     #   - inotify: use inotify
+    #   - stat: poll file modification times from PHP (no inotify extension) and trigger a graceful
+    #     worker reload. Use when inotify is unavailable/unreliable, e.g. macOS / Docker bind mounts.
     #   - external: dump files included before server start to text files,
     # files are parsed and used in swoole entrypoint command to decide if hard/soft reload is needed
     # files location, usually %kernel.cache_dir%/swoole_bundle/
@@ -68,6 +70,22 @@ swoole:
     #     enabled: true
     #     host: 0.0.0.0
     #     port: 9200
+
+    # enables the liveness endpoint on a separate port, served by a process of its own
+    # so that it keeps answering while every worker is busy
+    # by default it is disabled
+    healthcheck: true
+    # equals to:
+    # ---
+    # healthcheck:
+    #     enabled: true
+    #     host: 0.0.0.0
+    #     port: 9300
+    #     path: /healthz
+    #     # only relevant once the project registers a HealthCheck, see docs/swoole-health.md
+    #     checks:
+    #         interval: 5
+    #         staleness_threshold: 15
 
     # additional swoole symfony bundle services
     services:
@@ -270,6 +288,9 @@ To be able to use coroutines in your application the following trait has to be u
 
 This trait will disable state resetting of the app kernel while cloning it and makes some default overrides 
 and initializations.
+
+The custom kernel also has to implement the `Symfony\Component\HttpKernel\CacheWarmer\WarmableInterface` interface, 
+which is used to patch the kernel container for correct functioning of the cache warmup process for coroutines usage.
 
 ### Proxification
 

@@ -39,6 +39,11 @@ use SwooleBundle\SwooleBundle\Common\Adapter\Swoole;
 use SwooleBundle\SwooleBundle\Server\Config\Socket;
 use SwooleBundle\SwooleBundle\Server\Config\Sockets;
 use SwooleBundle\SwooleBundle\Server\Configurator\Configurator;
+use SwooleBundle\SwooleBundle\Server\Configurator\WithHealthEvaluatorProcess;
+use SwooleBundle\SwooleBundle\Server\Configurator\WithHealthProcess;
+use SwooleBundle\SwooleBundle\Server\Health\HealthCheck;
+use SwooleBundle\SwooleBundle\Server\Health\HealthReporter;
+use SwooleBundle\SwooleBundle\Server\Health\HealthStatusTable;
 use SwooleBundle\SwooleBundle\Server\HttpServerConfiguration;
 use SwooleBundle\SwooleBundle\Server\Middleware\MiddlewareInjector;
 use SwooleBundle\SwooleBundle\Server\RequestHandler\AdvancedStaticFilesServer;
@@ -50,10 +55,12 @@ use SwooleBundle\SwooleBundle\Server\Runtime\Bootable;
 use SwooleBundle\SwooleBundle\Server\Runtime\HMR\HotModuleReloader;
 use SwooleBundle\SwooleBundle\Server\Runtime\HMR\InotifyHMR;
 use SwooleBundle\SwooleBundle\Server\Runtime\HMR\NonReloadableFiles;
+use SwooleBundle\SwooleBundle\Server\Runtime\HMR\StatHMR;
 use SwooleBundle\SwooleBundle\Server\TaskHandler\TaskHandler;
 use SwooleBundle\SwooleBundle\Server\WorkerHandler\HMRWorkerStartHandler;
 use SwooleBundle\SwooleBundle\Server\WorkerHandler\WorkerStartHandler;
 use Symfony\Component\Config\FileLocator;
+use Symfony\Component\DependencyInjection\Argument\TaggedIteratorArgument;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
 use Symfony\Component\DependencyInjection\Definition;
 use Symfony\Component\DependencyInjection\Exception\ServiceNotFoundException;
@@ -130,8 +137,18 @@ use ZEngine\Core;
  *   verbosity: 'auto'|'verbose'|'default'|'trace',
  * }
  * @phpstan-type HmrConfig = array{
- *   enabled: 'off'|'auto'|'inotify'|'external',
+ *   enabled: 'off'|'auto'|'inotify'|'stat'|'external',
  *   file_path?: string,
+ * }
+ * @phpstan-type HealthcheckConfig = array{
+ *   enabled: bool,
+ *   host: string,
+ *   port: int,
+ *   path: string,
+ *   checks: array{
+ *     interval: int,
+ *     staleness_threshold: int,
+ *   },
  * }
  * @phpstan-type HttpServerConfig = array{
  *   running_mode: string,
@@ -140,6 +157,7 @@ use ZEngine\Core;
  *     host: string,
  *     port: int,
  *   },
+ *   healthcheck: HealthcheckConfig,
  *   hmr: HmrConfig,
  *   host: string,
  *   port: int,
@@ -184,6 +202,8 @@ final class SwooleExtension extends Extension
             ->addTag('swoole_bundle.bootable_service');
         $container->registerForAutoconfiguration(Configurator::class)
             ->addTag('swoole_bundle.server_configurator');
+        $container->registerForAutoconfiguration(HealthCheck::class)
+            ->addTag(ContainerConstants::TAG_HEALTH_CHECK);
 
         /** @var BundleConfig $config */
         $config = $this->processConfiguration($configuration, $configs);
@@ -360,6 +380,7 @@ final class SwooleExtension extends Extension
     {
         [
             'api' => $api,
+            'healthcheck' => $healthcheck,
             'hmr' => $hmr,
             'host' => $host,
             'port' => $port,
@@ -427,9 +448,39 @@ final class SwooleExtension extends Extension
             $sockets->addArgument(new Definition(Socket::class, [$api['host'], $api['port']]));
         }
 
+        if ($healthcheck['enabled']) {
+            $this->configureHttpServerHealthcheck($healthcheck, $container);
+        }
+
         $this->configureHttpServerHMR($hmr, $container);
 
         return $settings;
+    }
+
+    /**
+     * @param HealthcheckConfig $healthcheck
+     */
+    private function configureHttpServerHealthcheck(array $healthcheck, ContainerBuilder $container): void
+    {
+        $container->register(HealthStatusTable::class)
+            ->setFactory([HealthStatusTable::class, 'forChecks'])
+            ->setArgument('$checkCount', 0);
+
+        $container->register(HealthReporter::class)
+            ->setArgument('$table', new Reference(HealthStatusTable::class))
+            ->setArgument('$stalenessThreshold', $healthcheck['checks']['staleness_threshold']);
+
+        $container->register(WithHealthEvaluatorProcess::class)
+            ->setArgument('$table', new Reference(HealthStatusTable::class))
+            ->setArgument('$checks', new TaggedIteratorArgument(ContainerConstants::TAG_HEALTH_CHECK))
+            ->setArgument('$interval', $healthcheck['checks']['interval'])
+            ->addTag('swoole_bundle.server_configurator');
+
+        $container->register(WithHealthProcess::class)
+            ->setArgument('$socket', new Definition(Socket::class, [$healthcheck['host'], $healthcheck['port']]))
+            ->setArgument('$reporter', new Reference(HealthReporter::class))
+            ->setArgument('$path', $healthcheck['path'])
+            ->addTag('swoole_bundle.server_configurator');
     }
 
     /**
@@ -456,6 +507,12 @@ final class SwooleExtension extends Extension
                 ->addTag('swoole_bundle.bootable_service');
         }
 
+        if ($hmr['enabled'] === 'stat') {
+            $container->register(HotModuleReloader::class, StatHMR::class)
+                ->addTag('swoole_bundle.bootable_service')
+                ->setArgument('$kernelCacheDir', $container->getParameter('kernel.cache_dir'));
+        }
+
         $container->register(HMRWorkerStartHandler::class)
             ->setPublic(false)
             ->setAutoconfigured(false)
@@ -466,15 +523,11 @@ final class SwooleExtension extends Extension
     }
 
     /**
-     * @return 'inotify'|'off'
+     * @return 'inotify'|'stat'
      */
     private function resolveAutoHMR(): string
     {
-        if (extension_loaded('inotify')) {
-            return 'inotify';
-        }
-
-        return 'off';
+        return extension_loaded('inotify') ? 'inotify' : 'stat';
     }
 
     /**
